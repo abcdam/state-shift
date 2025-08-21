@@ -1,3 +1,4 @@
+#[rustfmt::skip]
 mod example {
     use core::marker::PhantomData;
     use core::mem::MaybeUninit;
@@ -84,10 +85,10 @@ mod example {
 
 #[test]
 fn test_method_builder() {
-    let myparentobj = example::MyParentObject::new();
+  let myparentobj = example::MyParentObject::new();
 
-    // using the clean builder pattern within the parent
-    let meth = myparentobj.method().set_slot_a(42).build();
-    let res = meth.start();
-    assert!(res.is_ok())
+  // using the clean builder pattern within the parent
+  let meth = myparentobj.method().set_slot_a(42).build();
+  let res = meth.start();
+  assert!(res.is_ok())
 }

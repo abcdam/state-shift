@@ -1,0 +1,19 @@
+binop_separator = "Front"
+max_width = 80
+edition = "2024"
+enum_discrim_align_threshold = 20
+fn_params_layout = "Vertical"
+fn_single_line = true
+format_strings = true
+imports_layout = "HorizontalVertical"
+inline_attribute_width = 50 # https://rust-lang.github.io/rustfmt/?version=v1.8.0&search=#inline_attribute_width
+match_block_trailing_comma = true #https://rust-lang.github.io/rustfmt/?version=v1.8.0&search=#match_block_trailing_comma
+imports_granularity = "Crate" # https://rust-lang.github.io/rustfmt/?version=v1.8.0&search=#imports_granularity
+normalize_comments = true # https://rust-lang.github.io/rustfmt/?version=v1.8.0&search=#normalize_comments
+normalize_doc_attributes = true # https://rust-lang.github.io/rustfmt/?version=v1.8.0&search=#normalize_doc_attributes
+overflow_delimited_expr = true # https://rust-lang.github.io/rustfmt/?version=v1.8.0&search=#overflow_delimited_expr
+reorder_impl_items = true # https://rust-lang.github.io/rustfmt/?version=v1.8.0&search=#reorder_impl_items
+group_imports = "StdExternalCrate" # https://rust-lang.github.io/rustfmt/?version=v1.8.0&search=#group_imports
+struct_field_align_threshold = 20 # https://rust-lang.github.io/rustfmt/?version=v1.8.0&search=#struct_field_align_threshold
+tab_spaces = 2 # https://rust-lang.github.io/rustfmt/?version=v1.8.0&search=#tab_spaces
+use_field_init_shorthand = true # https://rust-lang.github.io/rustfmt/?version=v1.8.0&search=#use_field_init_shorthand 
