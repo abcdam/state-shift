@@ -1,15 +1,13 @@
-use std::ops::Deref;
+use core::ops::Deref;
 
-use proc_macro::TokenTree;
 use quote::ToTokens;
 use syn::{
-  parse::{Parse, ParseStream},
-  punctuated::Punctuated,
   Attribute,
   Expr,
   Ident,
-  Result,
   Token,
+  parse::{Parse, ParseStream},
+  punctuated::Punctuated,
 };
 
 // === Generalized Parser types ===
@@ -20,10 +18,13 @@ type InnerCsvList<T> = Punctuated<T, Token![,]>;
 pub struct CsvList<T>(pub InnerCsvList<T>);
 
 /// type representing 'KEY = VALUE' tokens
-pub struct KeyValueAssignment {
+pub struct ParenCsvList<T>(pub CsvList<T>);
+
+/// type representing 'KEY = VALUE' tokens
+pub struct KeyValueAssignment<T = Expr> {
   pub key:   Ident,
   eq_token:  Token![=],
-  pub value: Expr,
+  pub value: T,
 }
 // === Various impl blocks for better DX ===
 /// ergonomic creation of a K/V token
@@ -37,8 +38,35 @@ impl From<(Ident, Expr)> for KeyValueAssignment {
   }
 }
 
+/// expose all functions of our inner newtype value
+impl<T> Deref for CsvList<T> {
+  type Target = InnerCsvList<T>;
+
+  fn deref(&self) -> &Self::Target { &self.0 }
+}
+impl<T> Deref for ParenCsvList<T> {
+  type Target = InnerCsvList<T>;
+
+  fn deref(&self) -> &Self::Target { &self.0 }
+}
+
+/// Implement Debug ergonomics for all ToToken trait implementers inside our newtype
+impl<T: ToTokens> core::fmt::Debug for CsvList<T> {
+  fn fmt(
+    &self,
+    f: &mut core::fmt::Formatter<'_>,
+  ) -> core::fmt::Result {
+    let items: Vec<String> = self
+      .0
+      .iter()
+      .map(|item| item.to_token_stream().to_string())
+      .collect();
+    f.debug_tuple("CsvList").field(&items).finish()
+  }
+}
+
 /// allows us to turn our KV struct into token streams
-impl ToTokens for KeyValueAssignment {
+impl<T: ToTokens> ToTokens for KeyValueAssignment<T> {
   fn to_tokens(
     &self,
     tokens: &mut proc_macro2::TokenStream,
@@ -49,34 +77,23 @@ impl ToTokens for KeyValueAssignment {
     quote::quote! { #key #eq #value }.to_tokens(tokens);
   }
 }
-/// Implement Debug ergonomics for all ToToken trait implementers inside our newtype
-impl<T: ToTokens> std::fmt::Debug for CsvList<T> {
-  fn fmt(
+
+impl<T: ToTokens> ToTokens for ParenCsvList<T> {
+  fn to_tokens(
     &self,
-    f: &mut std::fmt::Formatter<'_>,
-  ) -> std::fmt::Result {
-    let items: Vec<String> = self
-      .0
-      .iter()
-      .map(|item| item.to_token_stream().to_string())
-      .collect();
-    f.debug_tuple("CsvList").field(&items).finish()
+    tokens: &mut proc_macro2::TokenStream,
+  ) {
+    let items = &self.0.to_token_stream();
+    quote::quote! { (#items) }.to_tokens(tokens);
   }
 }
 
-/// expose all functions of our inner newtype value
-impl<T> Deref for CsvList<T> {
-  type Target = InnerCsvList<T>;
-
-  fn deref(&self) -> &Self::Target { &self.0 }
-}
-
 /// add Debug ergonomics for KV struct (that's why we require to_token_stream() on the syn-type fields)
-impl std::fmt::Debug for KeyValueAssignment {
+impl core::fmt::Debug for KeyValueAssignment {
   fn fmt(
     &self,
-    f: &mut std::fmt::Formatter<'_>,
-  ) -> std::fmt::Result {
+    f: &mut core::fmt::Formatter<'_>,
+  ) -> core::fmt::Result {
     f.debug_struct("KeyValueAssignment")
       .field("key", &self.key)
       .field("value", &self.value.to_token_stream().to_string())
@@ -84,16 +101,36 @@ impl std::fmt::Debug for KeyValueAssignment {
   }
 }
 
+impl core::fmt::Debug for TypeStateArgs {
+  fn fmt(
+    &self,
+    f: &mut core::fmt::Formatter<'_>,
+  ) -> core::fmt::Result {
+    f.debug_struct("TypeStateArgs")
+      .field("states", &self.states.to_token_stream().to_string())
+      .field("slots", &self.slots.to_token_stream().to_string())
+      .finish()
+  }
+}
+
+impl<T: Parse> Parse for ParenCsvList<T> {
+  fn parse(input: ParseStream) -> syn::Result<Self> {
+    let content;
+    syn::parenthesized!(content in input);
+    Ok(ParenCsvList(content.parse()?))
+  }
+}
+
 /// if T can be parsed, so can CsvList<T>
 impl<T: Parse> Parse for CsvList<T> {
-  fn parse(input: ParseStream) -> Result<Self> {
+  fn parse(input: ParseStream) -> syn::Result<Self> {
     // parse_separated_nonempty requires at least one element
     Ok(CsvList(Punctuated::parse_terminated(input)?))
   }
 }
 
-impl Parse for KeyValueAssignment {
-  fn parse(input: ParseStream) -> Result<Self> {
+impl<T: Parse> Parse for KeyValueAssignment<T> {
+  fn parse(input: ParseStream) -> syn::Result<Self> {
     Ok(KeyValueAssignment {
       key:      input.parse()?,
       eq_token: input.parse()?,
@@ -101,12 +138,76 @@ impl Parse for KeyValueAssignment {
     })
   }
 }
+
+impl Parse for TypeStateArgs {
+  fn parse(input: ParseStream) -> syn::Result<Self> {
+    let args: CsvList<KeyValueAssignment<ParenCsvList<Ident>>> =
+      input.parse()?;
+
+    let (states, slots, mut err_acc) = args.0.into_iter().fold(
+      (None, None, crate::Errors::new()),
+      |(mut states, mut slots, mut errors), kv| {
+        match kv.key.to_string().as_str() {
+          "states" if states.is_none() => states = Some(kv.value),
+
+          "slots" if slots.is_none() => slots = Some(kv.value),
+          "slots" | "states" => {
+            errors.push(syn::Error::new(kv.key.span(), "duplicate keys"));
+          },
+          _ => {
+            errors.push(syn::Error::new(kv.key.span(), "unsupported keys"));
+          },
+        }
+        (states, slots, errors)
+      },
+    );
+    if states.is_none() {
+      err_acc.push(syn::Error::new(input.span(), "missing `states`"));
+    }
+    if slots.is_none() {
+      err_acc.push(syn::Error::new(input.span(), "missing `slots`"));
+    }
+    if err_acc.is_some() {
+      Err(combine_parse_errors(err_acc))
+    } else {
+      Ok(Self {
+        states: states.unwrap(),
+        slots:  slots.unwrap(),
+      })
+    }
+  }
+}
+
+fn combine_parse_errors(e: crate::Errors) -> syn::Error {
+  // only call this when e is non-empty
+  e.0
+    .into_iter()
+    .reduce(|mut a, b| {
+      a.combine(b);
+      a
+    })
+    .expect("combine_errors called with empty Errors")
+}
+
+pub struct TypeStateArgs {
+  pub states: ParenCsvList<Ident>,
+  pub slots:  ParenCsvList<Ident>,
+}
+
 // === Type definitions for attribute parsing consumed by #[impl_state] ===
 /// Generalize over all optional macros that are consumed by #[impl_state]
 /// - Central place enforcing required type operations and macro identifiers
 pub trait IsSupportedMacro {
-  type Args: Parse + Sized + std::fmt::Debug;
+  type Args: Parse + Sized + core::fmt::Debug;
   const MACRO_NAME: &'static str;
+}
+
+/// #[type_state(...)]
+pub struct TypeStateMacro;
+impl IsSupportedMacro for TypeStateMacro {
+  type Args = TypeStateArgs;
+
+  const MACRO_NAME: &'static str = "type_state";
 }
 
 /// #[require(...)]
@@ -133,46 +234,39 @@ impl IsSupportedMacro for AutoAssignMacro {
   const MACRO_NAME: &'static str = "auto_assign";
 }
 
+pub fn parse_macro_args<M: IsSupportedMacro>(
+  tokens: proc_macro::TokenStream
+) -> Result<M::Args, syn::Error> {
+  syn::parse::<M::Args>(tokens)
+}
+
 /// Helper function to find and remove an attribute by name
 fn find_and_remove_attr(
   attrs: &mut Vec<Attribute>,
   attr_name: &str,
-) -> Option<Attribute> {
+) -> crate::Result<Attribute> {
   let pos = attrs
     .iter()
-    .position(|attr| attr.path().is_ident(attr_name))?;
-  Some(attrs.remove(pos))
+    .position(|attr| attr.path().is_ident(attr_name))
+    .ok_or_else(|| {
+      crate::Errors::new_at(
+        proc_macro2::Span::call_site(),
+        format!("Couldn't find {attr_name} macro."),
+      )
+    })?;
+
+  Ok(attrs.remove(pos))
 }
 
 /// Extracts the arguments from a macro call
 pub fn extract_macro_args<T>(
   attrs: &mut Vec<Attribute>
-) -> Option<<T as IsSupportedMacro>::Args>
+) -> crate::Result<<T as IsSupportedMacro>::Args>
 where
   T: IsSupportedMacro,
 {
   let attr = find_and_remove_attr(attrs, T::MACRO_NAME)?;
-  attr.parse_args().ok()
+  attr.parse_args().map_err(crate::Errors::from)
 }
 
 pub fn is_single_letter(ident: &Ident) -> bool { ident.to_string().len() == 1 }
-
-pub fn extract_idents_from_group(
-  token: &TokenTree,
-  error_msg: &str,
-) -> Vec<Ident> {
-  match token {
-    proc_macro::TokenTree::Group(group) => group
-      .stream()
-      .into_iter()
-      .filter_map(|tt| {
-        if let proc_macro::TokenTree::Ident(ident) = tt {
-          Some(Ident::new(&format!("{}", ident), ident.span().into()))
-        } else {
-          None
-        }
-      })
-      .collect(),
-    _ => panic!("{}", error_msg),
-  }
-}

@@ -1,10 +1,8 @@
 /// this file contains the logic that modifies the methods that are annotated with `#[require]` macro,
 /// however, all the functions inside this file will be used by `#[impl_state]` macro due to delegation needs
 use proc_macro2::TokenStream;
-use quote::{quote, ToTokens};
+use quote::{ToTokens, quote};
 use syn::{
-  parse_quote,
-  punctuated::Punctuated,
   Expr,
   ExprStruct,
   GenericParam,
@@ -14,10 +12,12 @@ use syn::{
   Stmt,
   Token,
   TypeParam,
+  parse_quote,
+  punctuated::Punctuated,
 };
 
 use crate::{
-  auto_assign::get_return_struct_macro_id,
+  auto_assign::get_struct_factory_ident,
   extract_macro_args,
   helper::{AutoAssignMacro, CsvList, SwitchToMacro},
   is_single_letter,
@@ -31,7 +31,7 @@ pub fn generate_impl_block_for_method_based_on_require_args(
   parsed_args: &CsvList<Ident>,
   impl_generics: &syn::Generics,
   struct_generics: &syn::PathArguments,
-) -> proc_macro2::TokenStream {
+) -> crate::Result<proc_macro2::TokenStream> {
   // Convert the struct's generics into a Punctuated collection
   let mut combined_generics = match struct_generics {
     syn::PathArguments::AngleBracketed(angle_bracketed) => {
@@ -100,7 +100,7 @@ pub fn generate_impl_block_for_method_based_on_require_args(
   // .cloned()
   // .collect();
   let assign_attr = extract_macro_args::<AutoAssignMacro>(&mut other_attrs);
-  let auto_assign_invocation = if let Some(kv_list) = assign_attr {
+  let auto_assign_invocation = if let Ok(kv_list) = assign_attr {
     let phantom_key = Ident::new("_state", struct_name.span());
     let phantom_expr: Expr = Expr::Verbatim(phantom_expr.clone());
     let phantom_declaration = parse_quote! {
@@ -108,18 +108,26 @@ pub fn generate_impl_block_for_method_based_on_require_args(
     };
     // inject the _state binding right before the macro invocation
     input_fn.block.stmts.push(phantom_declaration);
+    let list = kv_list.iter().map(|struct_field| -> Stmt {
+      let key =
+        Ident::new(struct_field.key.to_string().as_str(), struct_name.span());
+      let value = struct_field.value.clone();
+      parse_quote! {
+        let #key = #value;
+      }
+    });
     let tkns: Vec<TokenStream> = kv_list
       .iter()
       .map(|fragment| fragment.to_token_stream())
       .collect();
     let tkns: Vec<TokenStream> =
-      std::iter::once(phantom_key.into_token_stream())
+      core::iter::once(phantom_key.into_token_stream())
         .chain(tkns)
         .collect();
-    let helper_macro_name = get_return_struct_macro_id(struct_name);
+    let factory_entrypoint_id = get_struct_factory_ident(struct_name);
     // here we construct the call to the entrypoint of our internal struct generator
     let invocation = quote::quote! {
-        #helper_macro_name!(self, #(#tkns),*)
+        #factory_entrypoint_id!(self, #(#tkns),*)
     };
     let internal_macro_invocation: syn::Expr =
       syn::parse2(invocation).expect("failed to parse invocation");
@@ -152,7 +160,7 @@ pub fn generate_impl_block_for_method_based_on_require_args(
   // let switch_to_args = extract_macro_args(&mut other_attrs, "switch_to");
 
   // Generate the impl block for the method based on the extracted #[switch_to] arguments
-  let new_output = if let Some(switch_to_args) = switch_to_args {
+  let new_output = if let Ok(switch_to_args) = switch_to_args {
     switch_to_inner(
       fn_output,
       &switch_to_args,
@@ -184,7 +192,7 @@ pub fn generate_impl_block_for_method_based_on_require_args(
       }
   };
 
-  output
+  Ok(output)
 }
 
 fn modify_struct_in_expr(

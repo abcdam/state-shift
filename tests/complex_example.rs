@@ -1,4 +1,4 @@
-#[rustfmt::skip]
+// #[rustfmt::skip]
 use state_shift::{impl_state, type_state};
 
 #[derive(Debug)]
@@ -50,24 +50,19 @@ impl PlayerBuilder {
     }
   }
 
+  #[auto_assign(level = some_level_calc, race = race)]
   #[require(RaceSet, B, C)]
   #[switch_to(RaceSet, LevelSet, C)]
   fn set_level(
     self,
     level_modifier: u8,
+    race: Race,
   ) -> PlayerBuilder {
-    let level = match self.race {
-      Some(Race::Orc) => level_modifier + 2, // Orc's have +2 level advantage
-      Some(Race::Human) => level_modifier,   // humans are weak
+    let some_level_calc = match self.race {
+      Some(Race::Orc) => level_modifier + 2,
+      Some(Race::Human) => level_modifier,
       None => unreachable!("type safety ensures that `race` is initialized"),
     };
-
-    PlayerBuilder {
-      race:        self.race,
-      level:       Some(level),
-      skill_slots: self.skill_slots,
-      spell_slots: self.spell_slots,
-    }
   }
 
   #[require(RaceSet, B, C)]
@@ -143,7 +138,7 @@ mod tests {
   fn complex_player_creation_works() {
     let player = PlayerBuilder::new()
       .set_race(Race::Human)
-      .set_level(10)
+      .set_level(10, Race::Human)
       .set_skill_slots(10)
       .set_spells(10)
       .say_hi()

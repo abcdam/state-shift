@@ -1,7 +1,12 @@
-#[rustfmt::skip]
 use syn::{
-    punctuated::Punctuated, visit_mut::VisitMut, Ident, PathArguments, ReturnType, Token, Type,
-    TypePath,
+  Ident,
+  PathArguments,
+  ReturnType,
+  Token,
+  Type,
+  TypePath,
+  punctuated::Punctuated,
+  visit_mut::VisitMut,
 };
 
 pub fn switch_to_inner(

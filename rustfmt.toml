@@ -16,4 +16,4 @@ reorder_impl_items = true # https://rust-lang.github.io/rustfmt/?version=v1.8.0&
 group_imports = "StdExternalCrate" # https://rust-lang.github.io/rustfmt/?version=v1.8.0&search=#group_imports
 struct_field_align_threshold = 20 # https://rust-lang.github.io/rustfmt/?version=v1.8.0&search=#struct_field_align_threshold
 tab_spaces = 2 # https://rust-lang.github.io/rustfmt/?version=v1.8.0&search=#tab_spaces
-use_field_init_shorthand = true # https://rust-lang.github.io/rustfmt/?version=v1.8.0&search=#use_field_init_shorthand 
+use_field_init_shorthand = true # https://rust-lang.github.io/rustfmt/?version=v1.8.0&search=#use_field_init_shorthand

@@ -1,40 +1,38 @@
-#[rustfmt::skip]
-use proc_macro::TokenStream;
+use proc_macro::TokenStream as TokenStream1;
+use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use stringcase::snake_case;
-use syn::{parse_macro_input, Fields, Ident, ItemStruct};
+use syn::{
+  Ident,
+  ItemStruct,
+  WherePredicate,
+  parse_macro_input,
+  punctuated::Punctuated,
+  spanned::Spanned,
+  token::Comma,
+};
 
-use crate::{auto_assign::setup_return_type_macro, extract_idents_from_group};
+use crate::{
+  auto_assign::auto_assign_macro_factory,
+  helper::{TypeStateMacro, parse_macro_args},
+};
 
 pub fn type_state_inner(
-  args: TokenStream,
-  input: TokenStream,
-) -> TokenStream {
-  // Parse the input struct
+  args: TokenStream1,
+  input: TokenStream1,
+) -> TokenStream1 {
+  let mut errors = crate::Errors::new();
+
   let input_struct = parse_macro_input!(input as ItemStruct);
   let struct_name = &input_struct.ident;
   let generics = &input_struct.generics;
   let visibility = &input_struct.vis;
+  let attrs = input_struct.attrs;
 
-  // Parse arguments (states and slots)
-  // Indices:
-  // ---
-  // 0. `states`
-  // 1. `=`
-  // 2. `(State1, State2, State3)`
-  // 3. `,`
-  // 4. `slots`
-  // 5. `=`
-  // 6. `(State1, State1)`
-  let input_args: Vec<_> = args.into_iter().collect();
-  let states: Vec<Ident> =
-    extract_idents_from_group(&input_args[2], "expected a list of states");
-
-  let default_slots: Vec<Ident> = extract_idents_from_group(
-    &input_args[6],
-    "expected a list of default slots",
-  );
-
+  let type_state_args = match parse_macro_args::<TypeStateMacro>(args) {
+    Ok(type_state_args) => type_state_args,
+    Err(failure) => return errors.extend(failure.into()).to_compile_error(),
+  };
   // Generate the marker structs and sealing traits
   let sealer_trait_name =
     Ident::new(&format!("Sealer{}", struct_name), struct_name.span());
@@ -43,101 +41,123 @@ pub fn type_state_inner(
     struct_name.span(),
   );
 
-  let markers: Vec<_> = states
-    .iter()
-    .map(|state| {
-      let marker_name = Ident::new(&format!("{}", state), state.span());
-      quote! {
-          pub struct #marker_name;
-      }
-    })
-    .collect();
-
-  let sealed_impls: Vec<_> = states
-    .iter()
-    .map(|state| {
-      let marker_name = Ident::new(&format!("{}", state), state.span());
-      quote! {
-          impl #sealed_mod_name::Sealed for #marker_name {}
-      }
-    })
-    .collect();
-
-  let trait_impls: Vec<_> = states
-    .iter()
-    .map(|state| {
-      let marker_name = Ident::new(&format!("{}", state), state.span());
-      quote! {
-          impl #sealer_trait_name for #marker_name {}
-      }
-    })
-    .collect();
+  let (final_markers_ts, final_sealed_impls_ts, final_trait_impls_ts) =
+    type_state_args.states.iter().fold(
+      (
+        TokenStream2::new(),
+        TokenStream2::new(),
+        TokenStream2::new(),
+      ),
+      |(markers_ts, sealed_impl, trait_impls), state_ident| {
+        let marker_name =
+          Ident::new(state_ident.to_string().as_str(), state_ident.span());
+        (
+          quote! {  #markers_ts pub struct #marker_name;  },
+          quote! {  #sealed_impl impl #sealed_mod_name::Sealed for #marker_name {} },
+          quote! {  #trait_impls impl #sealer_trait_name for #marker_name {} },
+        )
+      },
+    );
 
   // Extract fields from the struct
   // we cannot use `input_struct.fields` directly because
   // quote! treats the Fields reference as a block expression,
   // leading to the generated fields being wrapped inside
   // an extra set of braces ({ ... }).
-  let struct_fields = match input_struct.fields {
-    Fields::Named(ref fields) => &fields.named,
-    Fields::Unnamed(_) => panic!("Expected named fields in struct."),
-    Fields::Unit => panic!("Expected a struct with fields."),
+  let struct_fields = match retrieve_struct_fields(&input_struct.fields) {
+    Ok(fields) => fields,
+    Err(err) => return errors.extend(err).into(),
   };
 
-  // Generate state generics: `struct StructName<PlayerState1, PlayerState2, ...>`
-  let state_idents: Vec<_> = (0..default_slots.len())
-    .map(|i| {
-      Ident::new(
-        &format!("{}State{}", struct_name, i + 1),
+  let (q_generics_assign_pairs, q_new_where_clause, q_phantom_fields): (
+    Vec<_>,
+    Vec<_>,
+    Vec<_>,
+  ) = type_state_args
+    .slots
+    .iter()
+    .enumerate()
+    .map(|(idx, slot_id)| {
+      // Generate state generics: `struct StructName<PlayerState1, PlayerState2, ...>`
+      let state_ident = Ident::new(
+        &format!("{}State{}", struct_name, idx + 1),
         struct_name.span(),
+      );
+      (
+        // default generic states
+        quote! {#state_ident = #slot_id},
+        // new where clause
+        quote! {#state_ident: #sealer_trait_name},
+        // Construct the `_state` field with PhantomData
+        // `_state: PhantomData<fn() -> T>`
+        // the reason for using `fn() -> T` is to: https://github.com/ozgunozerk/state-shift/issues/1
+        quote!(::core::marker::PhantomData<fn() -> #state_ident>),
       )
     })
     .collect();
 
   // Construct the new generics by merging original generics with default states
-  let default_generics = default_slots.iter().collect::<Vec<_>>();
-  let combined_generics = if generics.params.is_empty() {
-    quote! { #(#state_idents = #default_generics),* }
-  } else {
-    let original_generics = generics.params.iter();
-    quote! { #(#original_generics),*, #(#state_idents = #default_generics),* }
-  };
+  // let default_generics = type_state_args.slots.iter().collect::<Vec<_>>();
+  let combined_generics = {
+    let new_generics_iter =
+      q_generics_assign_pairs.iter().filter_map(|gp_pair| {
+        // You don't need to dereference `gp_pair` if it's a TokenStream
+        syn::parse2::<syn::GenericParam>(gp_pair.clone())
+          .map_err(|e| {
+            errors.extend(
+              (gp_pair.span(), format!("malformed Generic: {e}")).into(),
+            )
+          })
+          .ok()
+      });
 
-  // create a new where clause for the new generics (states)
-  let new_where_clause: Vec<_> = state_idents
+    let all_generics: Vec<_> = generics
+      .params
+      .iter()
+      .cloned()
+      .chain(new_generics_iter)
+      .collect();
+
+    quote! { #(#all_generics),* }
+  };
+  if errors.is_some() {
+    return errors.into();
+  }
+
+  let all_where_predicates: Vec<_> = generics
+    .where_clause
     .iter()
-    .map(|state| quote!(#state: #sealer_trait_name))
+    .flat_map(|wc| wc.predicates.iter())
+    .cloned()
+    .chain(
+      q_new_where_clause
+        .iter()
+        .filter_map(|ts| {
+          syn::parse2::<WherePredicate>(ts.clone())
+            .map_err(|e| {
+              errors.extend(
+                (ts.span(), format!("malformed WhereClause: {e}")).into(),
+              )
+            })
+            .ok() // we collect Err results and yield later
+        })
+        .collect::<Vec<_>>(), // evaluate new where predicates for errors
+    )
     .collect();
 
-  // Merge the where clauses if there is an existing one
-  let merged_where_clause = if let Some(existing_where) = &generics.where_clause
-  {
-    quote! { #existing_where #(#new_where_clause),* }
-  } else if !new_where_clause.is_empty() {
-    quote! { where #(#new_where_clause),* }
+  let merged_where_clause_ts = if !all_where_predicates.is_empty() {
+    quote! { where #(#all_where_predicates,)* }
   } else {
     quote! {}
   };
 
-  // Construct the `_state` field with PhantomData
-  // `_state: PhantomData<fn() -> T>`
-  // the reason for using `fn() -> T` is to: https://github.com/ozgunozerk/state-shift/issues/1
-  let phantom_fields = state_idents
-    .iter()
-    .map(|ident| quote!(::core::marker::PhantomData<fn() -> #ident>))
-    .collect::<Vec<_>>();
-
-  // Get the struct's attributes (other macros) excluding the #[type_state] macro
-  let attrs: Vec<_> = input_struct
-    .attrs
-    .iter()
-    .filter(|attr| !attr.path().is_ident("type_state"))
-    .collect();
-
   // generate internal macro that is invoked on associated functions
-  //    that declare `#[auto_assign(...)]` -> maybe introduce a flag to toggle this feature
-  let returned_struct_macro_tokens =
-    setup_return_type_macro(struct_name, struct_fields);
+  //    declarting `#[auto_assign(...)]` -> maybe introduce a flag to toggle this feature
+  let auto_assign_ts =
+    match auto_assign_macro_factory(struct_name, struct_fields) {
+      Ok(ts) => ts,
+      Err(e) => return errors.extend(e.into()).into(),
+    };
 
   // Generate the final output
   let output = quote! {
@@ -147,22 +167,29 @@ pub fn type_state_inner(
 
       pub trait #sealer_trait_name: #sealed_mod_name::Sealed {}
 
-      #(#markers)*
-
-      #(#sealed_impls)*
-
-      #(#trait_impls)*
+      #final_markers_ts
+      #final_sealed_impls_ts
+      #final_trait_impls_ts
 
       #(#attrs)*
       #[allow(clippy::type_complexity)]
       #visibility struct #struct_name<#combined_generics>
-      #merged_where_clause
+      #merged_where_clause_ts
       {
           #struct_fields
-          _state: (#(#phantom_fields),*),
+          _state: (#(#q_phantom_fields),*),
       }
-      #returned_struct_macro_tokens
+      #auto_assign_ts
   };
 
   output.into()
+}
+
+fn retrieve_struct_fields(
+  fields: &syn::Fields
+) -> crate::Result<&Punctuated<syn::Field, Comma>> {
+  match fields {
+    syn::Fields::Named(named) => Ok(&named.named),
+    other => Err((other.span(), "Struct must have named fields").into()),
+  }
 }
