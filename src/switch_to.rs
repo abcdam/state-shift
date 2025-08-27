@@ -1,13 +1,15 @@
 use syn::{
+  punctuated::Punctuated,
+  visit_mut::VisitMut,
   Ident,
   PathArguments,
   ReturnType,
   Token,
   Type,
   TypePath,
-  punctuated::Punctuated,
-  visit_mut::VisitMut,
 };
+
+use crate::prelude::external::*;
 
 pub fn switch_to_inner(
   fn_output: &ReturnType,
@@ -28,9 +30,8 @@ pub fn switch_to_inner(
   let original_return_type = match &fn_output {
     ReturnType::Type(_, ty) => &**ty,
     _ => panic!(
-      "Function `{}`: Expected a return type with explicit type annotation \
-       (e.g., '-> Type'), but found none.",
-      fn_name
+      "Function `{fn_name}`: Expected a return type with explicit type \
+       annotation (e.g., '-> Type'), but found none."
     ),
   };
 
@@ -100,8 +101,8 @@ fn modify_segment(
         });
     },
     _ => panic!(
-      "Function `{}`: Unsupported arguments in return type of the function.",
-      fn_name
+      "Function `{fn_name}`: Unsupported arguments in return type of the \
+       function."
     ),
   }
 }

@@ -2,7 +2,7 @@
 name = "state-shift"
 authors = ["Ozgun Ozerk"]
 version = "2.1.1"
-edition = "2024"
+edition = "2021"
 description = "Macros for implementing Type-State-Pattern on your structs and methods"
 readme = "README.md"
 license = "MIT"

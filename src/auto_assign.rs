@@ -1,130 +1,208 @@
-use proc_macro2::TokenStream;
-use quote::format_ident;
-use syn::{Field, Ident, Type, punctuated::Punctuated, token::Comma};
+use std::collections::HashMap;
+
+use proc_macro2::TokenStream as TokenStream2;
+use syn::{Attribute, Expr, Ident};
+
+use crate::{
+  extract_macro_args,
+  helper::{AutoAssignArgs, AutoAssignMacro},
+  prelude::extra_macros as m,
+};
+const MACRO_PREFIX: &str = "__state_shift_auto_assign";
 
 /// Unique per struct identifier for the internal factory entrypoint
 pub fn get_struct_factory_ident(struct_name: &Ident) -> Ident {
-  Ident::new(
-    &format!("__state_shift_auto_assign_{struct_name}"),
-    struct_name.span(),
-  )
+  Ident::new(&format!("{MACRO_PREFIX}_{struct_name}"), struct_name.span())
 }
-
 /// macro assembler for #[auto_assign(...)]
 pub fn auto_assign_macro_factory(
-  struct_id: &Ident,
-  struct_fields: &Punctuated<Field, Comma>,
-) -> syn::Result<TokenStream> {
-  let entrypoint_ident = get_struct_factory_ident(struct_id);
-  let (field_eval_callees, field_eval_callers) =
-    struct_fields.iter().try_fold(
-      (TokenStream::new(), TokenStream::new()),
-      |(mut acc_l, mut acc_r),
-       s_field|
-       -> syn::Result<(TokenStream, TokenStream)> {
-        let (callee, caller) = gen_eval_invoker_pair_for_field(
-          &entrypoint_ident.to_string(),
-          s_field,
-        )?;
-        acc_l.extend(callee);
-        acc_r.extend(caller);
-        Ok((acc_l, acc_r))
-      },
-    )?;
+  struct_name: &Ident,
+  struct_fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+) -> TokenStream2 {
+  let (field_idents, field_types) = struct_fields.iter().fold(
+    (Vec::new(), Vec::new()),
+    |(mut idents, mut types), f| {
+      idents.push(f.ident.as_ref().unwrap().clone());
+      types.push(f.ty.clone());
+      (idents, types)
+    },
+  );
+  let field_setter_macro_ts =
+    generate_fields_overrider_macro_ts(&field_idents, &field_types);
+  let input_validator_macro_ts =
+    generate_input_validation_macro_ts(struct_name, &field_idents);
+  let helper_trait_ts = get_type_handler_trait_ts();
+  let builder_macro_name = get_struct_factory_ident(struct_name);
+  let factory = m::quote! {
+    #[allow(unused_macros)]
+    #input_validator_macro_ts
 
-  Ok(quote::quote_spanned! { entrypoint_ident.span() =>
-    #field_eval_callees
-      macro_rules! #entrypoint_ident {
-          ($s:expr, $state_expr: expr, $($pairs:tt)*) => {
+    #[allow(unused_macros)]
+    #field_setter_macro_ts
 
-              #struct_id {
-                  #field_eval_callers
-                  _state: $state_expr
-              }
-          };
+    #[allow(unused_macros)]
+    macro_rules! #builder_macro_name {
+      ($self:expr, $phantom_state:expr, $($pairs:tt)*) => {
+        {
+        #helper_trait_ts
+          #struct_name {
+            #(#field_idents: default_or_override!($self, #field_idents, [ $($pairs)*]),)*
+            _state: $phantom_state
+          }
+        }
       }
+    }
+  };
+  factory
+}
+
+pub fn process_auto_assign(
+  func_ident: &Ident,
+  struct_name: &Ident,
+  all_attributes: &mut Vec<Attribute>,
+  phantom_state_field: TokenStream2,
+) -> crate::Result<TokenStream2> {
+  let assign_attr = match extract_macro_args::<AutoAssignMacro>(all_attributes)?
+  {
+    Some(args) => args,
+    None => return Ok(m::quote! {}),
+  };
+  let validator_macro_name =
+    m::format_ident!("__validate_fields_of_{}", struct_name);
+  // validator_macro_name.set_span(func_ident.span());
+  let usr_assignments = validate_and_get_usr_input(&assign_attr)?;
+  let validation_calls: Vec<_> = usr_assignments
+    .keys()
+    .map(|&k| m::quote! {#validator_macro_name!(#k);})
+    .collect();
+  let generated_code = m::quote! {
+      const _: () = {#( #validation_calls )*};
+  };
+
+  let kv_arms: Vec<_> = usr_assignments
+    .into_iter()
+    .map(|(field_to_update, expression_to_assign)| {
+      m::quote! {#field_to_update = #expression_to_assign
+      }
+    })
+    .collect();
+
+  let mut builder_macro_name = get_struct_factory_ident(struct_name);
+  builder_macro_name.set_span(func_ident.span());
+  Ok(m::quote! {
+    #generated_code
+    #builder_macro_name!(self, #phantom_state_field, #(#kv_arms),* )
   })
 }
 
-// Private
+fn get_type_handler_trait_ts() -> TokenStream2 {
+  m::quote! {
+    trait OptionWrapper<T> {
+      fn wrap(self) -> Option<T>;
+    }
+    impl<T> OptionWrapper<T> for T {
+      fn wrap(self) -> Option<T> {
+          Some(self)
+      }
+    }
+    impl<T> OptionWrapper<T> for Option<T> {
+      fn wrap(self) -> Option<T> {
+          self
+      }
+    }
+  }
+}
+fn generate_fields_overrider_macro_ts(
+  f_idents: &[Ident],
+  f_types: &[syn::Type],
+) -> TokenStream2 {
+  let override_arms = f_idents
+    .iter()
+    .zip(f_types.iter())
+    .map(|(id, ty)| wrap_option_type(id, ty));
 
-fn is_option_type(ty: &Type) -> bool {
-  if let Type::Path(type_path) = ty {
-    type_path
-      .path
-      .segments
-      .last()
-      .map(|seg| seg.ident == "Option")
-      .unwrap_or(false)
-  } else {
-    false
+  m::quote! {
+    macro_rules! default_or_override {
+      #(#override_arms)*
+      ($self:expr, $field:ident, [$other:ident = $val:expr, $($rest:tt)*]) => {
+        default_or_override!($self, $field, [$($rest)*])
+      };
+      ($self:expr, $field:ident, [$other:ident = $val:expr]) => {default_or_override!($self, $field,[])};
+      ($self:expr, $field:ident,[]) => {$self.$field};
+
+     }
   }
 }
 
-fn create_list_expression_evaluator_ts(
-  field_id: &Ident,
-  field_assigner_id: &Ident,
-  is_option_type: bool,
-) -> TokenStream {
-  let handled_token = if is_option_type {
-    quote::quote! { Some($val) }
-  } else {
-    quote::quote! { $val }
-  };
-  // unique assign macro per struct field
-  quote::quote! {
-      macro_rules! #field_assigner_id {
-          // head matches `field = $val, ...`
-          ($s:expr, #field_id = $val:expr, $($rest:tt)*) => { #handled_token };
-
-          // last `field = $val`
-          ($s:expr, #field_id = $val:expr) => { #handled_token };
-
-          // other head: skip and recurse
-          ($s:expr, $other:ident = $val:expr, $($rest:tt)*) => { #field_assigner_id!($s, $($rest)*) };
-
-          // skip last non-matching item
-          ($s:expr, $other:ident = $val:expr) => { #field_assigner_id!($s) };
-
-          // nothing matched: fall back to original $s.field
-          ($s:expr) => { $s.#field_id };
+fn generate_input_validation_macro_ts(
+  struct_name: &Ident,
+  f_idents: &[Ident],
+) -> TokenStream2 {
+  let valid_field_arms = f_idents.iter().map(|ident| {
+    m::quote! { (#ident) => {}; }
+  });
+  let valid_fields_list_str = f_idents
+    .iter()
+    .map(|i| format!("`{i}`"))
+    .collect::<Vec<_>>()
+    .join(", ");
+  let validator_macro_name =
+    m::format_ident!("__validate_fields_of_{}", struct_name);
+  let error_message = format!(
+    "invalid field provided. Valid fields for `{struct_name}` are: \
+     {valid_fields_list_str}."
+  );
+  m::quote! {
+      macro_rules! #validator_macro_name {
+          #( #valid_field_arms )*
+          ($other:ident) => { compile_error!(concat!(#error_message)) };
       }
   }
 }
 
-fn invoke_struct_field_evaluator_ts(
-  field_id: &Ident,
-  field_assigner_id: &Ident,
-) -> TokenStream {
-  quote::quote! {
-      #field_id: #field_assigner_id!($s, $($pairs)*),
-  }
+fn validate_and_get_usr_input(
+  user_args: &AutoAssignArgs
+) -> crate::Result<HashMap<&Ident, &Expr>> {
+  Ok(
+    user_args
+      .iter()
+      .try_fold(HashMap::new(), |mut map, kv| {
+        if let Some(old_entry) = map.insert(kv.key.to_string(), kv) {
+          Err(crate::Errors::new_at(
+            old_entry.key.span(),
+            "Repeated Assignment not allowed",
+          ))
+        } else {
+          Ok(map)
+        }
+      })?
+      .iter()
+      .fold(HashMap::new(), |mut map, entry| {
+        map.insert(&entry.1.key, &entry.1.value);
+        map
+      }),
+  )
 }
 
-fn gen_eval_invoker_pair_for_field(
-  assign_field_macro_ident_prefix: &str,
-  struct_field: &Field,
-) -> syn::Result<(TokenStream, TokenStream)> {
-  let field_id = struct_field.ident.as_ref().ok_or_else(|| {
-    syn::Error::new_spanned(
-      struct_field,
-      "tuple/unnamed fields are not supported by auto_assign",
-    )
-  })?;
-
-  let assign_struct_field_id = format_ident!(
-    "{}_{}",
-    assign_field_macro_ident_prefix,
-    field_id.to_string()
-  );
-
-  let struct_field_eval_invoker_ts =
-    invoke_struct_field_evaluator_ts(field_id, &assign_struct_field_id);
-
-  let args_evaluator_ts = create_list_expression_evaluator_ts(
-    field_id,
-    &assign_struct_field_id,
-    is_option_type(&struct_field.ty),
-  );
-  Ok((args_evaluator_ts, struct_field_eval_invoker_ts))
+fn wrap_option_type(
+  id: &Ident,
+  ty: &syn::Type,
+) -> TokenStream2 {
+  match ty {
+    syn::Type::Path(type_path)
+      if type_path.qself.is_none()
+        && type_path
+          .path
+          .segments
+          .last()
+          .is_some_and(|seg| seg.ident == "Option") =>
+    {
+      m::quote! {
+        ($self:expr, #id, [#id = $val:expr $(, $($rest:tt)*)?]) => {OptionWrapper::wrap($val)};
+      }
+    },
+    _ => {
+      m::quote! {($self:expr, #id, [#id = $val:expr $(, $($rest:tt)*)?]) => { $val };}
+    },
+  }
 }

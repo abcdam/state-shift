@@ -1,9 +1,8 @@
 #![allow(clippy::needless_lifetimes)]
-#[rustfmt::skip]
-
-use state_shift::{impl_state, type_state};
 
 use core::fmt::Debug;
+
+use state_shift::{impl_state, type_state};
 
 #[derive(Debug)]
 struct Player<'a, 'b: 'a, T> {

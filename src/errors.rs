@@ -2,6 +2,7 @@ use proc_macro::TokenStream as TokenStream1;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use syn::Error as SynError;
 
+use crate::prelude::external::{Vec, vec};
 /// Aggregator for syn::Error we can push to
 /// emit them as compile errors at the end.
 #[derive(Default, Debug)]
@@ -82,4 +83,4 @@ impl From<&mut Errors> for TokenStream1 {
   fn from(e: &mut Errors) -> TokenStream1 { e.to_compile_error() }
 }
 
-pub(crate) type Result<T> = std::result::Result<T, Errors>;
+pub(crate) type Result<T> = core::result::Result<T, Errors>;

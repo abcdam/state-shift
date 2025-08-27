@@ -1,8 +1,8 @@
 /// this file contains the logic that modifies the methods that are annotated with `#[require]` macro,
 /// however, all the functions inside this file will be used by `#[impl_state]` macro due to delegation needs
 use proc_macro2::TokenStream;
-use quote::{ToTokens, quote};
 use syn::{
+  punctuated::Punctuated,
   Expr,
   ExprStruct,
   GenericParam,
@@ -10,17 +10,15 @@ use syn::{
   ImplItemFn,
   Member,
   Stmt,
-  Token,
   TypeParam,
-  parse_quote,
-  punctuated::Punctuated,
 };
 
 use crate::{
-  auto_assign::get_struct_factory_ident,
+  auto_assign::process_auto_assign,
   extract_macro_args,
-  helper::{AutoAssignMacro, CsvList, SwitchToMacro},
+  helper::{CsvList, SwitchToMacro},
   is_single_letter,
+  prelude::{external::*, extra_macros as m},
   switch_to_inner,
 };
 
@@ -55,88 +53,57 @@ pub fn generate_impl_block_for_method_based_on_require_args(
   // A: Sealer,
   // B: Sealer,
   let sealer_trait_name =
-    Ident::new(&format!("Sealer{}", struct_name), struct_name.span());
+    Ident::new(&format!("Sealer{struct_name}"), struct_name.span());
   let new_where_clauses: Vec<proc_macro2::TokenStream> = parsed_args
     .iter()
-    .filter(|ident| is_single_letter(ident))
-    .map(|ident| quote!(#ident: #sealer_trait_name))
+    .filter(|&ident| is_single_letter(ident))
+    .map(|ident| m::quote!(#ident: #sealer_trait_name))
     .collect();
 
   // Merge with the existing where clause, if any.
   let merged_where_clause =
     if let Some(existing_where) = &impl_generics.where_clause {
-      quote! {
+      m::quote! {
           #existing_where #(#new_where_clauses),*
       }
     } else if !new_where_clauses.is_empty() {
-      quote! {
+      m::quote! {
           where #(#new_where_clauses),*
       }
     } else {
-      quote! {}
+      m::quote! {}
     };
 
   // Merge the original generics with the new single-letter generics.
   let mut all_generics = impl_generics.params.clone();
-  for ident in parsed_args.iter().filter(|i| is_single_letter(i)) {
+  for ident in parsed_args.iter().filter(|&i| is_single_letter(i)) {
     all_generics.push(GenericParam::Type(TypeParam::from(ident.clone())));
   }
 
   // Generate PhantomData for the required number of states
   let phantom_data: Vec<_> = (0..parsed_args.len())
-    .map(|_| quote!(::core::marker::PhantomData))
+    .map(|_| m::quote!(::core::marker::PhantomData))
     .collect();
 
   let phantom_expr = if phantom_data.len() == 1 {
-    quote! { ::core::marker::PhantomData }
+    m::quote! { ::core::marker::PhantomData }
   } else {
-    quote! { ( #(#phantom_data),* ) }
+    m::quote! { ( #(#phantom_data),* ) }
   };
   // Collect other function attributes (excluding `#[require]`).
   //    -> Require was already extracted earlier in impl_state.rs
   let mut other_attrs: Vec<_> = input_fn.attrs.clone();
-  // .iter()
-  // .filter(|attr| !attr.path().is_ident("require"))
-  // .cloned()
-  // .collect();
-  let assign_attr = extract_macro_args::<AutoAssignMacro>(&mut other_attrs);
-  let auto_assign_invocation = if let Ok(kv_list) = assign_attr {
-    let phantom_key = Ident::new("_state", struct_name.span());
-    let phantom_expr: Expr = Expr::Verbatim(phantom_expr.clone());
-    let phantom_declaration = parse_quote! {
-        let _state = #phantom_expr;
-    };
-    // inject the _state binding right before the macro invocation
-    input_fn.block.stmts.push(phantom_declaration);
-    let list = kv_list.iter().map(|struct_field| -> Stmt {
-      let key =
-        Ident::new(struct_field.key.to_string().as_str(), struct_name.span());
-      let value = struct_field.value.clone();
-      parse_quote! {
-        let #key = #value;
-      }
-    });
-    let tkns: Vec<TokenStream> = kv_list
-      .iter()
-      .map(|fragment| fragment.to_token_stream())
-      .collect();
-    let tkns: Vec<TokenStream> =
-      core::iter::once(phantom_key.into_token_stream())
-        .chain(tkns)
-        .collect();
-    let factory_entrypoint_id = get_struct_factory_ident(struct_name);
-    // here we construct the call to the entrypoint of our internal struct generator
-    let invocation = quote::quote! {
-        #factory_entrypoint_id!(self, #(#tkns),*)
-    };
-    let internal_macro_invocation: syn::Expr =
-      syn::parse2(invocation).expect("failed to parse invocation");
-    Some(Stmt::Expr(internal_macro_invocation, None))
-  } else {
-    None
+
+  let auto_assign_ts = match process_auto_assign(
+    &input_fn.sig.ident,
+    struct_name,
+    &mut other_attrs,
+    phantom_expr.clone(),
+  ) {
+    Ok(constructed_auto_assign) => constructed_auto_assign,
+    err => err?,
   };
-  // Modify the function body to append `_state: (PhantomData, ...)` to struct fields.
-  let mut new_fn_body: Vec<_> = input_fn
+  let new_fn_body: Vec<_> = input_fn
     .block
     .stmts
     .iter()
@@ -152,15 +119,13 @@ pub fn generate_impl_block_for_method_based_on_require_args(
       stmt.clone()
     })
     .collect();
-  if let Some(auto_assign_macro) = auto_assign_invocation {
-    new_fn_body.push(auto_assign_macro);
-  }
+
   let fn_output = &input_fn.sig.output;
-  let switch_to_args = extract_macro_args::<SwitchToMacro>(&mut other_attrs);
+  let switch_to_args = extract_macro_args::<SwitchToMacro>(&mut other_attrs)?;
   // let switch_to_args = extract_macro_args(&mut other_attrs, "switch_to");
 
   // Generate the impl block for the method based on the extracted #[switch_to] arguments
-  let new_output = if let Ok(switch_to_args) = switch_to_args {
+  let new_output = if let Some(switch_to_args) = switch_to_args {
     switch_to_inner(
       fn_output,
       &switch_to_args,
@@ -181,17 +146,17 @@ pub fn generate_impl_block_for_method_based_on_require_args(
   let fn_vis = &input_fn.vis;
 
   // Generate the final output `impl` block.
-  let output = quote! {
+  let output = m::quote! {
       impl<#all_generics> #struct_name<#combined_generics>
       #merged_where_clause
       {
           #(#other_attrs)*
           #fn_vis #fn_sig {
               #(#new_fn_body)*
+              #auto_assign_ts
           }
       }
   };
-
   Ok(output)
 }
 
@@ -210,7 +175,7 @@ fn modify_struct_in_expr(
           "_state",
           struct_name.span(),
         )),
-        colon_token: Some(<Token![:]>::default()),
+        colon_token: Some(<m::Token![:]>::default()),
         expr:        Expr::Verbatim(phantom_expr.clone()),
       });
 

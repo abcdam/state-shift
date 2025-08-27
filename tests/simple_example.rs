@@ -34,7 +34,8 @@ impl PlayerBuilder {
     }
   }
 
-  #[auto_assign(race=race)]
+  // automatically constructs the returned struct with updated race, everything else is carried over
+  // #[auto_assign(race=race)]
   #[require(Initial)] // can be called only at `Initial` state.
   #[switch_to(RaceSet)] // Transitions to `RaceSet` state
   fn set_race(
@@ -42,6 +43,11 @@ impl PlayerBuilder {
     race: Race,
   ) -> PlayerBuilder {
     // is auto generated
+    PlayerBuilder {
+      race:        Some(race),
+      level:       self.level,
+      skill_slots: self.skill_slots,
+    }
   }
 
   #[require(RaceSet)]
@@ -119,7 +125,7 @@ impl PlayerBuilder {
 
 #[cfg(test)]
 mod tests {
-  use super::*;
+  use super::{PlayerBuilder, Race};
 
   #[test]
   fn simple_player_creation_works() {
@@ -147,7 +153,7 @@ mod tests {
   #[test]
   fn other_macros_are_preserved() {
     let player = PlayerBuilder::new();
-    println!("{:?}", player); // ensures `#[derive(Debug)]` is preserved
+    println!("{player:?}"); // ensures `#[derive(Debug)]` is preserved
     assert_eq!(player.level, None);
   }
 }

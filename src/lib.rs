@@ -13,6 +13,7 @@
 //! - `#[switch_to]`: Modifies the return type of methods to switch between states.
 //! - `#[impl_state]`: Defines the valid states for a given type and generates corresponding marker structs and trait implementations.
 //! - `#[type_state]`: Transforms the struct into type-state compatible form, using state slots and default states.
+// #![no_std]
 
 extern crate proc_macro;
 
@@ -20,11 +21,12 @@ mod auto_assign;
 mod errors;
 mod helper;
 mod impl_state;
+mod prelude;
 mod require;
 mod switch_to;
 mod type_state;
 
-pub(crate) use errors::{Errors, Result};
+use errors::{Errors, Result};
 use helper::{extract_macro_args, is_single_letter};
 use impl_state::impl_state_inner;
 use proc_macro::TokenStream;

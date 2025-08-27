@@ -2,28 +2,32 @@ use core::ops::Deref;
 
 use quote::ToTokens;
 use syn::{
+  parse::{Parse, ParseStream},
+  punctuated::Punctuated,
   Attribute,
   Expr,
   Ident,
-  Token,
-  parse::{Parse, ParseStream},
-  punctuated::Punctuated,
+};
+
+use crate::prelude::{
+  external::{String, ToString, Vec},
+  extra_macros as m,
 };
 
 // === Generalized Parser types ===
 /// just an alias to reduce verbosity
-type InnerCsvList<T> = Punctuated<T, Token![,]>;
+type InnerCsvList<T> = Punctuated<T, m::Token![,]>;
 
 /// newtype that represents a comma separated list of (generic) items
 pub struct CsvList<T>(pub InnerCsvList<T>);
 
-/// type representing 'KEY = VALUE' tokens
+/// type representing '(entry, entry,..)' tokens
 pub struct ParenCsvList<T>(pub CsvList<T>);
 
 /// type representing 'KEY = VALUE' tokens
 pub struct KeyValueAssignment<T = Expr> {
   pub key:   Ident,
-  eq_token:  Token![=],
+  eq_token:  m::Token![=],
   pub value: T,
 }
 // === Various impl blocks for better DX ===
@@ -46,6 +50,11 @@ impl<T> Deref for CsvList<T> {
 }
 impl<T> Deref for ParenCsvList<T> {
   type Target = InnerCsvList<T>;
+
+  fn deref(&self) -> &Self::Target { &self.0 }
+}
+impl Deref for AutoAssignArgs {
+  type Target = CsvList<KeyValueAssignment>;
 
   fn deref(&self) -> &Self::Target { &self.0 }
 }
@@ -74,7 +83,7 @@ impl<T: ToTokens> ToTokens for KeyValueAssignment<T> {
     let key = &self.key;
     let eq = &self.eq_token;
     let value = &self.value;
-    quote::quote! { #key #eq #value }.to_tokens(tokens);
+    m::quote! { #key #eq #value }.to_tokens(tokens);
   }
 }
 
@@ -84,10 +93,17 @@ impl<T: ToTokens> ToTokens for ParenCsvList<T> {
     tokens: &mut proc_macro2::TokenStream,
   ) {
     let items = &self.0.to_token_stream();
-    quote::quote! { (#items) }.to_tokens(tokens);
+    m::quote! { (#items) }.to_tokens(tokens);
   }
 }
-
+impl ToTokens for AutoAssignArgs {
+  fn to_tokens(
+    &self,
+    tokens: &mut proc_macro2::TokenStream,
+  ) {
+    self.0.to_tokens(tokens);
+  }
+}
 /// add Debug ergonomics for KV struct (that's why we require to_token_stream() on the syn-type fields)
 impl core::fmt::Debug for KeyValueAssignment {
   fn fmt(
@@ -116,7 +132,7 @@ impl core::fmt::Debug for TypeStateArgs {
 impl<T: Parse> Parse for ParenCsvList<T> {
   fn parse(input: ParseStream) -> syn::Result<Self> {
     let content;
-    syn::parenthesized!(content in input);
+    m::parenthesized!(content in input);
     Ok(ParenCsvList(content.parse()?))
   }
 }
@@ -178,6 +194,11 @@ impl Parse for TypeStateArgs {
   }
 }
 
+impl Parse for AutoAssignArgs {
+  fn parse(input: ParseStream) -> syn::Result<Self> {
+    Ok(AutoAssignArgs(input.parse()?))
+  }
+}
 fn combine_parse_errors(e: crate::Errors) -> syn::Error {
   // only call this when e is non-empty
   e.0
@@ -193,7 +214,8 @@ pub struct TypeStateArgs {
   pub states: ParenCsvList<Ident>,
   pub slots:  ParenCsvList<Ident>,
 }
-
+#[derive(Debug)]
+pub struct AutoAssignArgs(CsvList<KeyValueAssignment>);
 // === Type definitions for attribute parsing consumed by #[impl_state] ===
 /// Generalize over all optional macros that are consumed by #[impl_state]
 /// - Central place enforcing required type operations and macro identifiers
@@ -229,7 +251,7 @@ impl IsSupportedMacro for SwitchToMacro {
 /// #[auto_assign(...)]
 pub struct AutoAssignMacro;
 impl IsSupportedMacro for AutoAssignMacro {
-  type Args = CsvList<KeyValueAssignment>;
+  type Args = AutoAssignArgs;
 
   const MACRO_NAME: &'static str = "auto_assign";
 }
@@ -244,29 +266,23 @@ pub fn parse_macro_args<M: IsSupportedMacro>(
 fn find_and_remove_attr(
   attrs: &mut Vec<Attribute>,
   attr_name: &str,
-) -> crate::Result<Attribute> {
-  let pos = attrs
+) -> Option<Attribute> {
+  attrs
     .iter()
     .position(|attr| attr.path().is_ident(attr_name))
-    .ok_or_else(|| {
-      crate::Errors::new_at(
-        proc_macro2::Span::call_site(),
-        format!("Couldn't find {attr_name} macro."),
-      )
-    })?;
-
-  Ok(attrs.remove(pos))
+    .map(|pos| attrs.remove(pos))
 }
 
 /// Extracts the arguments from a macro call
 pub fn extract_macro_args<T>(
   attrs: &mut Vec<Attribute>
-) -> crate::Result<<T as IsSupportedMacro>::Args>
+) -> crate::Result<Option<<T as IsSupportedMacro>::Args>>
 where
   T: IsSupportedMacro,
 {
-  let attr = find_and_remove_attr(attrs, T::MACRO_NAME)?;
-  attr.parse_args().map_err(crate::Errors::from)
+  find_and_remove_attr(attrs, T::MACRO_NAME)
+    .map(|attr| attr.parse_args().map_err(crate::Errors::from))
+    .transpose()
 }
 
 pub fn is_single_letter(ident: &Ident) -> bool { ident.to_string().len() == 1 }

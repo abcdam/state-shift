@@ -27,7 +27,7 @@ struct PlayerBuilder {
 #[impl_state]
 impl PlayerBuilder {
   #[require(Initial, Initial, Initial)] // require the default state for the constructor
-  fn new() -> Self {
+  fn new() -> PlayerBuilder {
     PlayerBuilder {
       race:        None,
       level:       None,
@@ -50,13 +50,12 @@ impl PlayerBuilder {
     }
   }
 
-  #[auto_assign(level = some_level_calc, race = race)]
+  #[auto_assign(level = some_level_calc)]
   #[require(RaceSet, B, C)]
   #[switch_to(RaceSet, LevelSet, C)]
   fn set_level(
     self,
     level_modifier: u8,
-    race: Race,
   ) -> PlayerBuilder {
     let some_level_calc = match self.race {
       Some(Race::Orc) => level_modifier + 2,
@@ -65,6 +64,7 @@ impl PlayerBuilder {
     };
   }
 
+  #[auto_assign(skill_slots=skill_slots,race=race)]
   #[require(RaceSet, B, C)]
   #[switch_to(RaceSet, B, SkillSlotsSet)]
   fn set_skill_slots(
@@ -78,13 +78,7 @@ impl PlayerBuilder {
         unreachable!("type safety ensures that `race` should be initialized")
       },
     };
-
-    PlayerBuilder {
-      race:        self.race,
-      level:       self.level,
-      skill_slots: Some(skill_slots),
-      spell_slots: self.spell_slots,
-    }
+    let race = Race::Human;
   }
 
   #[require(A, LevelSet, SkillSlotsSet)]
@@ -138,12 +132,11 @@ mod tests {
   fn complex_player_creation_works() {
     let player = PlayerBuilder::new()
       .set_race(Race::Human)
-      .set_level(10, Race::Human)
+      .set_level(10)
       .set_skill_slots(10)
       .set_spells(10)
       .say_hi()
       .build();
-
     assert_eq!(player.race, Race::Human);
     assert_eq!(player.level, 10);
     assert_eq!(player.skill_slots, 11);

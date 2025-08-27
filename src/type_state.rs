@@ -3,18 +3,19 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use stringcase::snake_case;
 use syn::{
-  Ident,
-  ItemStruct,
-  WherePredicate,
   parse_macro_input,
   punctuated::Punctuated,
   spanned::Spanned,
   token::Comma,
+  Ident,
+  ItemStruct,
+  WherePredicate,
 };
 
 use crate::{
   auto_assign::auto_assign_macro_factory,
-  helper::{TypeStateMacro, parse_macro_args},
+  helper::{parse_macro_args, TypeStateMacro},
+  prelude::external::*,
 };
 
 pub fn type_state_inner(
@@ -27,7 +28,11 @@ pub fn type_state_inner(
   let struct_name = &input_struct.ident;
   let generics = &input_struct.generics;
   let visibility = &input_struct.vis;
-  let attrs = input_struct.attrs;
+  let attrs: Vec<_> = input_struct
+    .attrs
+    .iter()
+    .filter(|&attr| !attr.path().is_ident("type_state"))
+    .collect();
 
   let type_state_args = match parse_macro_args::<TypeStateMacro>(args) {
     Ok(type_state_args) => type_state_args,
@@ -35,7 +40,7 @@ pub fn type_state_inner(
   };
   // Generate the marker structs and sealing traits
   let sealer_trait_name =
-    Ident::new(&format!("Sealer{}", struct_name), struct_name.span());
+    Ident::new(&format!("Sealer{struct_name}"), struct_name.span());
   let sealed_mod_name = Ident::new(
     &format!("sealed_{}", snake_case(&struct_name.to_string())),
     struct_name.span(),
@@ -151,15 +156,8 @@ pub fn type_state_inner(
     quote! {}
   };
 
-  // generate internal macro that is invoked on associated functions
-  //    declarting `#[auto_assign(...)]` -> maybe introduce a flag to toggle this feature
-  let auto_assign_ts =
-    match auto_assign_macro_factory(struct_name, struct_fields) {
-      Ok(ts) => ts,
-      Err(e) => return errors.extend(e.into()).into(),
-    };
-
-  // Generate the final output
+  let auto_assign_struct_generator =
+    auto_assign_macro_factory(struct_name, struct_fields);
   let output = quote! {
       mod #sealed_mod_name {
           pub trait Sealed {}
@@ -179,9 +177,8 @@ pub fn type_state_inner(
           #struct_fields
           _state: (#(#q_phantom_fields),*),
       }
-      #auto_assign_ts
+      #auto_assign_struct_generator
   };
-
   output.into()
 }
 
