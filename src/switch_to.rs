@@ -1,19 +1,17 @@
 use syn::{
-  punctuated::Punctuated,
   visit_mut::VisitMut,
   Ident,
   PathArguments,
   ReturnType,
-  Token,
   Type,
   TypePath,
 };
 
-use crate::prelude::external::*;
+use crate::helper::CsvList;
 
 pub fn switch_to_inner(
   fn_output: &ReturnType,
-  parsed_args: &Punctuated<Ident, Token![,]>,
+  parsed_args: &CsvList<Ident>,
   struct_name: &Ident,
   fn_name: &Ident,
 ) -> ReturnType {

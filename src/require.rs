@@ -1,166 +1,26 @@
 /// this file contains the logic that modifies the methods that are annotated with `#[require]` macro,
 /// however, all the functions inside this file will be used by `#[impl_state]` macro due to delegation needs
 use proc_macro2::TokenStream;
+use quote::quote;
 use syn::{
   punctuated::Punctuated,
+  spanned::Spanned,
+  token::Comma,
   Expr,
   ExprStruct,
+  GenericArgument,
   GenericParam,
   Ident,
-  ImplItemFn,
   Member,
-  Stmt,
+  Token,
   TypeParam,
+  WhereClause,
+  WherePredicate,
 };
 
-use crate::{
-  auto_assign::process_auto_assign,
-  extract_macro_args,
-  helper::{CsvList, SwitchToMacro},
-  is_single_letter,
-  prelude::{external::*, extra_macros as m},
-  switch_to_inner,
-};
+use crate::{helper::RequiredMacro, is_single_letter};
 
-pub fn generate_impl_block_for_method_based_on_require_args(
-  input_fn: &mut ImplItemFn,
-  struct_name: &Ident,
-  // parsed_args: &Punctuated<Ident, Token![,]>,
-  parsed_args: &CsvList<Ident>,
-  impl_generics: &syn::Generics,
-  struct_generics: &syn::PathArguments,
-) -> crate::Result<proc_macro2::TokenStream> {
-  // Convert the struct's generics into a Punctuated collection
-  let mut combined_generics = match struct_generics {
-    syn::PathArguments::AngleBracketed(angle_bracketed) => {
-      angle_bracketed.args.clone()
-    },
-    syn::PathArguments::None => Punctuated::new(),
-    _ => panic!("Unsupported generics format for struct"),
-  };
-
-  // Append the full list of arguments from `#[require]` macro: (A, B, State1, ...)
-  combined_generics.extend(parsed_args.iter().map(|ident| {
-    // Convert each parsed argument into a GenericArgument (which is a TypeParam)
-    syn::GenericArgument::Type(syn::Type::Path(syn::TypePath {
-      qself: None,
-      path:  syn::Path::from(ident.clone()), // Use the ident for the type path
-    }))
-  }));
-
-  // put the sealed trait boundary for the generics:
-  // ``` where
-  // A: Sealer,
-  // B: Sealer,
-  let sealer_trait_name =
-    Ident::new(&format!("Sealer{struct_name}"), struct_name.span());
-  let new_where_clauses: Vec<proc_macro2::TokenStream> = parsed_args
-    .iter()
-    .filter(|&ident| is_single_letter(ident))
-    .map(|ident| m::quote!(#ident: #sealer_trait_name))
-    .collect();
-
-  // Merge with the existing where clause, if any.
-  let merged_where_clause =
-    if let Some(existing_where) = &impl_generics.where_clause {
-      m::quote! {
-          #existing_where #(#new_where_clauses),*
-      }
-    } else if !new_where_clauses.is_empty() {
-      m::quote! {
-          where #(#new_where_clauses),*
-      }
-    } else {
-      m::quote! {}
-    };
-
-  // Merge the original generics with the new single-letter generics.
-  let mut all_generics = impl_generics.params.clone();
-  for ident in parsed_args.iter().filter(|&i| is_single_letter(i)) {
-    all_generics.push(GenericParam::Type(TypeParam::from(ident.clone())));
-  }
-
-  // Generate PhantomData for the required number of states
-  let phantom_data: Vec<_> = (0..parsed_args.len())
-    .map(|_| m::quote!(::core::marker::PhantomData))
-    .collect();
-
-  let phantom_expr = if phantom_data.len() == 1 {
-    m::quote! { ::core::marker::PhantomData }
-  } else {
-    m::quote! { ( #(#phantom_data),* ) }
-  };
-  // Collect other function attributes (excluding `#[require]`).
-  //    -> Require was already extracted earlier in impl_state.rs
-  let mut other_attrs: Vec<_> = input_fn.attrs.clone();
-
-  let auto_assign_ts = match process_auto_assign(
-    &input_fn.sig.ident,
-    struct_name,
-    &mut other_attrs,
-    phantom_expr.clone(),
-  ) {
-    Ok(constructed_auto_assign) => constructed_auto_assign,
-    err => err?,
-  };
-  let new_fn_body: Vec<_> = input_fn
-    .block
-    .stmts
-    .iter()
-    .map(|stmt| {
-      if let Stmt::Expr(expr, maybe_semi) = stmt {
-        if let Some(modified_expr) =
-          modify_struct_in_expr(expr, struct_name, phantom_expr.clone())
-        {
-          // Return the modified expression as a statement
-          return Stmt::Expr(modified_expr, *maybe_semi);
-        }
-      }
-      stmt.clone()
-    })
-    .collect();
-
-  let fn_output = &input_fn.sig.output;
-  let switch_to_args = extract_macro_args::<SwitchToMacro>(&mut other_attrs)?;
-  // let switch_to_args = extract_macro_args(&mut other_attrs, "switch_to");
-
-  // Generate the impl block for the method based on the extracted #[switch_to] arguments
-  let new_output = if let Some(switch_to_args) = switch_to_args {
-    switch_to_inner(
-      fn_output,
-      &switch_to_args,
-      struct_name,
-      &input_fn.sig.ident,
-    )
-  } else {
-    // there is no `#[switch_to]` macro, so we use the `#[require]` macro's arguments instead
-    // to keep the type same for the input and the output
-    switch_to_inner(fn_output, parsed_args, struct_name, &input_fn.sig.ident)
-  };
-
-  // construct the signature again
-  let fn_sig = &mut input_fn.sig;
-  fn_sig.output = new_output;
-
-  // extract visibility
-  let fn_vis = &input_fn.vis;
-
-  // Generate the final output `impl` block.
-  let output = m::quote! {
-      impl<#all_generics> #struct_name<#combined_generics>
-      #merged_where_clause
-      {
-          #(#other_attrs)*
-          #fn_vis #fn_sig {
-              #(#new_fn_body)*
-              #auto_assign_ts
-          }
-      }
-  };
-  Ok(output)
-}
-
-fn modify_struct_in_expr(
+pub fn modify_struct_in_expr(
   expr: &Expr,
   struct_name: &syn::Ident,
   phantom_expr: TokenStream,
@@ -175,7 +35,7 @@ fn modify_struct_in_expr(
           "_state",
           struct_name.span(),
         )),
-        colon_token: Some(<m::Token![:]>::default()),
+        colon_token: Some(<Token![:]>::default()),
         expr:        Expr::Verbatim(phantom_expr.clone()),
       });
 
@@ -212,5 +72,142 @@ fn modify_struct_in_expr(
       }
     },
     _ => None,
+  }
+}
+
+pub struct ImplFromRequired<'a> {
+  pub src_impl_generics: &'a syn::Generics,
+  pub _input_fn_ident:   &'a Ident,
+  pub struct_name:       &'a Ident,
+  pub struct_generics:   &'a Punctuated<GenericArgument, Comma>,
+  pub required_state:    &'a RequiredMacro,
+}
+pub struct ImplFromRequiredResult {
+  pub combined_struct_generics: Punctuated<GenericArgument, Comma>,
+  pub all_impl_block_generics:  Punctuated<GenericParam, Comma>,
+  pub impl_block_where_clause:  Option<WhereClause>,
+  pub phantom_state_expr:       TokenStream,
+}
+pub fn build_impl_block_signature(
+  args: &ImplFromRequired
+) -> crate::Result<ImplFromRequiredResult> {
+  // Convert the struct's generics into a Punctuated collection
+  let combined_struct_generics: Punctuated<GenericArgument, Comma> = args
+    .struct_generics
+    .clone()
+    .into_iter()
+    // Append the full list of arguments from `#[require]` macro: (A, B, State1, ...)
+    .chain(args.required_state.iter().map(|ident| {
+    // Convert each parsed argument into a GenericArgument (which is a TypeParam)
+    syn::GenericArgument::Type(syn::Type::Path(syn::TypePath {
+      qself: None,
+      path:  syn::Path::from(ident.clone()), // Use the ident for the type path
+    }))
+  })).collect();
+
+  // put the sealed trait boundary for the generics:
+  // ``` where
+  // A: Sealer,
+  // B: Sealer,
+  let sealer_trait_name = Ident::new(
+    &format!("Sealer{}", args.struct_name),
+    args.struct_name.span(),
+  );
+  let new_where_clause_predicates: Vec<WherePredicate> = args
+    .src_impl_generics
+    .where_clause
+    .iter()
+    .flat_map(|wc| wc.predicates.iter())
+    .cloned()
+    .chain(
+      args
+        .required_state
+        .iter()
+        .filter(|ident| is_single_letter(ident))
+        .filter_map(|ident| {
+          syn::parse2::<syn::WherePredicate>(
+            quote! {#ident: #sealer_trait_name},
+          )
+          .ok()
+        })
+        .collect::<Vec<_>>(),
+    )
+    .collect();
+  // Merge with the existing where clause, if any.
+  let impl_block_where_clause = if !new_where_clause_predicates.is_empty() {
+    Some(syn::parse2::<syn::WhereClause>(
+      quote! { where #(#new_where_clause_predicates,)* },
+    )?)
+  } else {
+    None
+  };
+  // Generate PhantomData for the required number of states
+  let phantom_data: Vec<_> = (0..args.required_state.len())
+    .map(|_| quote!(::core::marker::PhantomData))
+    .collect();
+
+  let all_impl_block_generics: Punctuated<GenericParam, Comma> = args
+    .src_impl_generics
+    .params
+    .iter()
+    .cloned()
+    .chain(
+      args
+        .required_state
+        .iter()
+        .filter(|ident| is_single_letter(ident))
+        .map(|g_ident| GenericParam::Type(TypeParam::from(g_ident.clone())))
+        .collect::<Punctuated<GenericParam, Comma>>(),
+    )
+    .collect();
+  let phantom_state_expr = if phantom_data.len() == 1 {
+    quote! { ::core::marker::PhantomData }
+  } else {
+    quote! { ( #(#phantom_data),* ) }
+  };
+
+  Ok(ImplFromRequiredResult {
+    combined_struct_generics,
+    all_impl_block_generics,
+    impl_block_where_clause,
+    phantom_state_expr,
+  })
+}
+
+pub fn extract_struct_ident_and_generics(
+  input: syn::ItemImpl
+) -> crate::Result<(syn::Ident, Punctuated<GenericArgument, syn::token::Comma>)>
+{
+  match input.self_ty.as_ref() {
+    syn::Type::Path(type_path) => {
+      let last_segment = match type_path.path.segments.last() {
+        Some(seg) => seg,
+        None => {
+          return Err(crate::Errors::new_at(
+            input.self_ty.span(),
+            "Unsupported type for impl block",
+          ))?
+        },
+      };
+
+      let struct_name = &last_segment.ident;
+
+      let struct_generics = match &last_segment.arguments {
+        syn::PathArguments::None => Punctuated::new(),
+        syn::PathArguments::AngleBracketed(angle) => angle.args.clone(),
+        syn::PathArguments::Parenthesized(p) => {
+          return Err(crate::Errors::new_at(
+            p.span(),
+            "Unsupported generics format for struct",
+          ))?
+        },
+      };
+
+      Ok((struct_name.clone(), struct_generics))
+    },
+    _ => Err(crate::Errors::new_at(
+      input.self_ty.span(),
+      "Unsupported type for impl block",
+    ))?,
   }
 }

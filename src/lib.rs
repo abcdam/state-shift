@@ -21,16 +21,15 @@ mod auto_assign;
 mod errors;
 mod helper;
 mod impl_state;
-mod prelude;
 mod require;
 mod switch_to;
 mod type_state;
 
 use errors::{Errors, Result};
-use helper::{extract_macro_args, is_single_letter};
+use helper::is_single_letter;
 use impl_state::impl_state_inner;
 use proc_macro::TokenStream;
-use require::generate_impl_block_for_method_based_on_require_args;
+// use require::generate_impl_block_for_method_based_on_require_args;
 use switch_to::switch_to_inner;
 use type_state::type_state_inner;
 

@@ -15,7 +15,6 @@ use syn::{
 use crate::{
   auto_assign::auto_assign_macro_factory,
   helper::{parse_macro_args, TypeStateMacro},
-  prelude::external::*,
 };
 
 pub fn type_state_inner(
@@ -36,7 +35,10 @@ pub fn type_state_inner(
 
   let type_state_args = match parse_macro_args::<TypeStateMacro>(args) {
     Ok(type_state_args) => type_state_args,
-    Err(failure) => return errors.extend(failure.into()).to_compile_error(),
+    Err(failure) => {
+      errors.extend(failure.into());
+      return errors.to_compile_error();
+    },
   };
   // Generate the marker structs and sealing traits
   let sealer_trait_name =
@@ -71,7 +73,10 @@ pub fn type_state_inner(
   // an extra set of braces ({ ... }).
   let struct_fields = match retrieve_struct_fields(&input_struct.fields) {
     Ok(fields) => fields,
-    Err(err) => return errors.extend(err).into(),
+    Err(err) => {
+      errors.extend(err);
+      return errors.to_compile_error();
+    },
   };
 
   let (q_generics_assign_pairs, q_new_where_clause, q_phantom_fields): (

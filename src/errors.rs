@@ -2,7 +2,6 @@ use proc_macro::TokenStream as TokenStream1;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use syn::Error as SynError;
 
-use crate::prelude::external::{Vec, vec};
 /// Aggregator for syn::Error we can push to
 /// emit them as compile errors at the end.
 #[derive(Default, Debug)]
@@ -17,19 +16,6 @@ impl Errors {
     msg: T,
   ) -> Self {
     syn::Error::new(span.into(), msg).into()
-  }
-
-  pub(crate) fn absorb<T: core::default::Default>(
-    &mut self,
-    result: Result<T>,
-  ) -> T {
-    match result {
-      Ok(val) => val,
-      Err(errs) => {
-        self.extend(errs);
-        T::default()
-      },
-    }
   }
 
   /// push a `syn::Error`.
@@ -47,9 +33,8 @@ impl Errors {
   pub(crate) fn extend(
     &mut self,
     mut other: Errors,
-  ) -> &mut Self {
+  ) {
     self.0.append(&mut other.0);
-    self
   }
 
   /// `proc_macro::TokenStream` containing all collected compile errors
@@ -69,7 +54,7 @@ impl<T> From<(Span, T)> for Errors
 where
   T: core::fmt::Display,
 {
-  fn from(value: (Span, T)) -> Self { syn::Error::new(value.0, value.1).into() }
+  fn from(value: (Span, T)) -> Self { SynError::new(value.0, value.1).into() }
 }
 /// Convenient conversions
 impl From<SynError> for Errors {
