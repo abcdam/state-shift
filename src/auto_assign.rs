@@ -57,15 +57,14 @@ pub fn process_auto_assign(
   phantom_state_field: TokenStream2,
   assign_attr: AutoAssignMacro,
 ) -> crate::Result<TokenStream2> {
-  let mut validator_macro_name =
+  let validator_macro_name =
     InternMacro::InputValidation(struct_name, func_ident.span()).to_ident();
-  validator_macro_name.set_span(func_ident.span());
   let usr_assignments = validate_and_get_usr_input(&assign_attr)?;
   let validation_calls: Vec<_> = usr_assignments
     .keys()
     .map(|&k| quote! {#validator_macro_name!(#k);})
     .collect();
-  let generated_code = quote! {
+  let generated_validation_calls = quote! {
       const _: () = {#( #validation_calls )*};
   };
 
@@ -80,7 +79,7 @@ pub fn process_auto_assign(
   let mut builder_macro_name = InternMacro::Entrypoint(struct_name).to_ident();
   builder_macro_name.set_span(func_ident.span());
   Ok(quote! {
-    #generated_code
+    #generated_validation_calls
     #builder_macro_name!(self, #phantom_state_field, #(#kv_arms),* )
   })
 }
@@ -141,7 +140,7 @@ fn generate_fields_overrider_macro_ts(
   let override_handlers = f_idents
     .iter()
     .zip(f_types.iter())
-    .map(|(id, ty)| wrap_option_type(id, ty));
+    .map(|(id, ty)| wrap_option_type_ts(id, ty));
 
   quote! {
     macro_rules! default_or_override {
@@ -174,13 +173,13 @@ fn generate_input_validation_macro_ts(
     .collect::<Vec<_>>()
     .join(", ");
 
-  let validator_macro_name =
-    InternMacro::InputValidation(struct_name, struct_name.span()).to_ident();
-
   let error_message = format!(
     "invalid field provided. Valid fields for `{struct_name}` are: \
      {valid_fields_list_str}."
   );
+
+  let validator_macro_name =
+    InternMacro::InputValidation(struct_name, struct_name.span()).to_ident();
   quote! {
       macro_rules! #validator_macro_name {
 
@@ -217,7 +216,7 @@ fn validate_and_get_usr_input(
   )
 }
 
-fn wrap_option_type(
+fn wrap_option_type_ts(
   id: &Ident,
   ty: &syn::Type,
 ) -> TokenStream2 {

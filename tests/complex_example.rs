@@ -50,12 +50,13 @@ impl PlayerBuilder {
     }
   }
 
-  #[auto_assign(level = some_level_calc)]
+  #[auto_assign(level = some_level_calc, race = race)]
   #[require(RaceSet, B, C)]
   #[switch_to(RaceSet, LevelSet, C)]
   fn set_level(
     self,
     level_modifier: u8,
+    race: Race,
   ) -> PlayerBuilder {
     let some_level_calc = match self.race {
       Some(Race::Orc) => level_modifier + 2,
@@ -132,7 +133,7 @@ mod tests {
   fn complex_player_creation_works() {
     let player = PlayerBuilder::new()
       .set_race(Race::Human)
-      .set_level(10)
+      .set_level(10, Race::Human)
       .set_skill_slots(10)
       .set_spells(10)
       .say_hi()
